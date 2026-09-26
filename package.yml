@@ -1,0 +1,95 @@
+name: tcpdump
+title: tcpdump
+summary: Captures and decodes network packets, and reads, filters and writes pcap files. Built from the signed tcpdump release with the distro's libpcap.
+homepage: https://www.tcpdump.org/
+license: BSD-2-Clause AND BSD-3-Clause AND BSD-4-Clause AND BSD-4-Clause-UC AND ISC AND NTP
+upstream:
+  source: github-tag
+  repository: the-tcpdump-group/tcpdump
+  # Release tags look like tcpdump-4.99.7; branch points (tcpdump-4.99-bp) do not match.
+  tag-pattern: '^tcpdump-(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 4.99.7
+  artifact:
+    url: https://www.tcpdump.org/release/tcpdump-{version}.tar.xz
+    signature: https://www.tcpdump.org/release/tcpdump-{version}.tar.xz.sig
+    sha256: 39675dfa06fb0e99be8da5d4a1784acbaab58ae0870231d956ff7870cb99eec1
+image:
+  entrypoint: [tcpdump]
+  cmd: [--help]
+test:
+  - |
+    tcpdump --version > version.txt
+    test "$(head -n 1 version.txt)" = "tcpdump version $VERSION"
+    grep -q '^libpcap version ' version.txt
+    grep -q '^OpenSSL ' version.txt
+  - |
+    # Three packets from 10.0.0.1 to 10.0.0.2 with valid checksums.
+    {
+      # pcap file header, Ethernet
+      printf '\324\303\262\241\002\000\004\000\000\000\000\000\000\000\000\000\377\377\000\000'
+      printf '\001\000\000\000'
+      # ICMP echo request
+      printf '\000\271\125\151\000\000\000\000\056\000\000\000\056\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\040\000\001\100\000\100\001\046\332\012\000\000\001\012\000\000\002'
+      printf '\010\000\006\372\022\064\000\001\160\151\156\147'
+      # TCP SYN to port 80
+      printf '\001\271\125\151\000\000\000\000\066\000\000\000\066\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\050\000\002\100\000\100\006\046\314\012\000\000\001\012\000\000\002'
+      printf '\234\100\000\120\000\000\003\350\000\000\000\000\120\002\372\360\000\167\000\000'
+      # DNS query for example.org
+      printf '\002\271\125\151\000\000\000\000\107\000\000\000\107\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\071\000\003\100\000\100\021\046\257\012\000\000\001\012\000\000\002'
+      printf '\317\010\000\065\000\045\067\274\022\064\001\000\000\001\000\000\000\000\000\000'
+      printf '\007\145\170\141\155\160\154\145\003\157\162\147\000\000\001\000\001'
+    } > sample.pcap
+    tcpdump -t -n -r sample.pcap > decoded.txt
+    grep -Fqx 'IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4660, seq 1, length 12' decoded.txt
+    grep -Fqx 'IP 10.0.0.1.40000 > 10.0.0.2.80: Flags [S], seq 1000, win 64240, length 0' decoded.txt
+    grep -Fqx 'IP 10.0.0.1.53000 > 10.0.0.2.53: 4660+ A? example.org. (29)' decoded.txt
+    tcpdump -t -n -vv -r sample.pcap > verbose.txt
+    grep -Fq 'cksum 0x0077 (correct)' verbose.txt
+    grep -Fq '[udp sum ok]' verbose.txt
+    tcpdump -t -n -e -r sample.pcap icmp > link.txt
+    grep -Fq '02:00:00:00:00:01 > 02:00:00:00:00:02, ethertype IPv4 (0x0800), length 46: ' link.txt
+    tcpdump -r sample.pcap -w dns.pcap 'udp port 53'
+    tcpdump -t -n -r dns.pcap > dns.txt
+    test "$(wc -l < dns.txt)" -eq 1
+    grep -Fq 'A? example.org.' dns.txt
+  - |
+    # An ESP packet in tunnel mode. It carries an ICMP echo request from
+    # 192.168.1.1 to 192.168.2.1, encrypted with AES-128-CBC and the key
+    # 000102030405060708090a0b0c0d0e0f.
+    {
+      printf '\324\303\262\241\002\000\004\000\000\000\000\000\000\000\000\000\377\377\000\000'
+      printf '\001\000\000\000'
+      printf '\000\271\125\151\000\000\000\000\152\000\000\000\152\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\134\000\004\100\000\100\062\046\152\012\000\000\001\012\000\000\002'
+      printf '\000\000\020\000\000\000\000\001\360\341\322\303\264\245\226\207\170\151\132\113'
+      printf '\074\055\036\017\202\271\241\064\176\311\114\021\334\361\045\030\111\350\100\207'
+      printf '\037\164\147\130\060\224\015\017\245\271\177\051\240\305\233\300\373\115\250\012'
+      printf '\175\336\045\045\107\327\222\256\352\032\230\111'
+    } > esp.pcap
+    tcpdump -t -n -r esp.pcap > esp.txt
+    grep -Fqx 'IP 10.0.0.1 > 10.0.0.2: ESP(spi=0x00001000,seq=0x1), length 72' esp.txt
+    tcpdump -t -n -E aes128-cbc:0x000102030405060708090a0b0c0d0e0f -r esp.pcap > decrypted.txt
+    grep -Fqx 'IP 10.0.0.1 > 10.0.0.2: ESP(spi=0x00001000,seq=0x1), length 72: IP 192.168.1.1 > 192.168.2.1: ICMP echo request, id 1, seq 1, length 14' decrypted.txt
+  - |
+    # Listing interfaces needs no privileges, unlike capturing on them.
+    tcpdump -D > interfaces.txt
+    grep -Eq '^[0-9]+\.lo( |$)' interfaces.txt
+    grep -Eq '^[0-9]+\.any( |$)' interfaces.txt
+examples:
+  - title: Print the packets in a capture file
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/tcpdump -n -r capture.pcap
+  - title: Copy the DNS packets of a capture file to a new file
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/tcpdump -r capture.pcap -w dns.pcap 'udp port 53'
+  - title: Watch the traffic of a running container named web
+    command: docker run --rm --user 0 --cap-add NET_RAW --network container:web ghcr.io/randomcontainers/tcpdump -i eth0 -n -l
+  - title: Save 1000 packets from the host's eth0 to a file
+    command: docker run --rm --user 0 --cap-add NET_RAW --network host ghcr.io/randomcontainers/tcpdump -i eth0 -c 1000 -w - > capture.pcap
