@@ -1,0 +1,107 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS source
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gpgv xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz /src/
+ADD https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz.sig /src/
+# The Tcpdump Group's package signing key, fingerprint 1F16 6A57 42AB B9E0 249A 8D30 E089 DEF1 D9C1 5D0D
+COPY keys/tcpdump-release.gpg /tmp/tcpdump-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/tcpdump-release.gpg "tcpdump-${VERSION}.tar.xz.sig" "tcpdump-${VERSION}.tar.xz"; \
+    mkdir tcpdump; \
+    tar -xJf "tcpdump-${VERSION}.tar.xz" -C tcpdump --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+# The base image's packages are recorded before anything is installed, so that
+# runtime-deps can leave them out. Every image that installs runtime-deps is
+# built on the same base.
+RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      libpcap0.8-dev \
+      libssl-dev \
+      pkgconf \
+ && rm -rf /var/lib/apt/lists/*
+COPY --link --from=source /src/tcpdump /src/tcpdump
+WORKDIR /src/tcpdump
+ARG JOBS
+# libcrypto is required for decrypting ESP (-E). libsmi and libcap-ng are
+# linked whenever configure finds them, so they are turned off explicitly.
+RUN set -eu; \
+    ./configure \
+      --prefix=/usr/local \
+      --disable-local-libpcap \
+      --with-crypto=yes \
+      --without-cap-ng \
+      --without-smi; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install DESTDIR=/out; \
+    rm -f /out/usr/local/bin/tcpdump.[0-9]*; \
+    rm -rf /out/usr/local/share/man; \
+    strip --strip-unneeded /out/usr/local/bin/tcpdump
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the packages that own the libraries the binaries load,
+# minus the base image's packages, plus the packages in runtime-deps.ubuntu.
+# The source files carry their own copyright notices and licenses; NOTICES
+# keeps the first comment with a copyright line from each of them.
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    test "$(/out/usr/local/bin/tcpdump --version | head -n 1)" = "tcpdump version ${VERSION}"; \
+    meta=/out/usr/local/share/randomcontainers/tcpdump; \
+    mkdir -p "$meta/licenses"; \
+    cp LICENSE "$meta/licenses/"; \
+    for f in *.c *.h missing/*.c missing/*.h; do \
+      [ -f "$f" ] || continue; \
+      awk 'NR == 1 && /^\/\/.*[Cc]opyright/ { print; exit } /\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /[Cc]opyright|COPYRIGHT/) { printf "%s", b; exit } }' \
+        "$f" > /tmp/notice; \
+      if [ -s /tmp/notice ]; then printf '%s:\n\n' "$f"; cat /tmp/notice; echo; fi; \
+    done > "$meta/licenses/NOTICES"; \
+    test -s "$meta/licenses/NOTICES"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz" \
+      "https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz.sig" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      echo "configure: $(sed -n 's/^  \$ \.\/configure //p' config.log)"; \
+      /out/usr/local/bin/tcpdump --version; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f -perm -u+x -print0 | xargs -0 ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | sort -u | comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/tcpdump/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "tcpdump"]
+CMD ["--help"]
