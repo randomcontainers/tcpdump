@@ -1,3 +1,4 @@
 *
 !keys/tcpdump-release.gpg
+!runtime-deps.alpine
 !runtime-deps.ubuntu

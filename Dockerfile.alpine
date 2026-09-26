@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS source
+RUN apk add --no-cache gpgv xz
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz /src/
+ADD https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz.sig /src/
+# The Tcpdump Group's package signing key, fingerprint 1F16 6A57 42AB B9E0 249A 8D30 E089 DEF1 D9C1 5D0D
+COPY keys/tcpdump-release.gpg /tmp/tcpdump-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/tcpdump-release.gpg "tcpdump-${VERSION}.tar.xz.sig" "tcpdump-${VERSION}.tar.xz"; \
+    mkdir tcpdump; \
+    tar -xJf "tcpdump-${VERSION}.tar.xz" -C tcpdump --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+RUN apk add --no-cache \
+      build-base \
+      libpcap-dev \
+      openssl-dev \
+      pkgconf \
+      scanelf
+COPY --link --from=source /src/tcpdump /src/tcpdump
+WORKDIR /src/tcpdump
+ARG JOBS
+# libcrypto is required for decrypting ESP (-E). libsmi and libcap-ng are
+# linked whenever configure finds them, so they are turned off explicitly.
+RUN set -eu; \
+    ./configure \
+      --prefix=/usr/local \
+      --disable-local-libpcap \
+      --with-crypto=yes \
+      --without-cap-ng \
+      --without-smi; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install DESTDIR=/out; \
+    rm -f /out/usr/local/bin/tcpdump.[0-9]*; \
+    rm -rf /out/usr/local/share/man; \
+    strip --strip-unneeded /out/usr/local/bin/tcpdump
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the so: names the binaries need, minus the libraries
+# built here, plus the packages in runtime-deps.alpine.
+# The source files carry their own copyright notices and licenses; NOTICES
+# keeps the first comment with a copyright line from each of them.
+RUN --mount=type=bind,source=runtime-deps.alpine,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    test "$(/out/usr/local/bin/tcpdump --version | head -n 1)" = "tcpdump version ${VERSION}"; \
+    meta=/out/usr/local/share/randomcontainers/tcpdump; \
+    mkdir -p "$meta/licenses"; \
+    cp LICENSE "$meta/licenses/"; \
+    for f in *.c *.h missing/*.c missing/*.h; do \
+      [ -f "$f" ] || continue; \
+      awk 'NR == 1 && /^\/\/.*[Cc]opyright/ { print; exit } /\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /[Cc]opyright|COPYRIGHT/) { printf "%s", b; exit } }' \
+        "$f" > /tmp/notice; \
+      if [ -s /tmp/notice ]; then printf '%s:\n\n' "$f"; cat /tmp/notice; echo; fi; \
+    done > "$meta/licenses/NOTICES"; \
+    test -s "$meta/licenses/NOTICES"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz" \
+      "https://www.tcpdump.org/release/tcpdump-${VERSION}.tar.xz.sig" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      echo "configure: $(sed -n 's/^  \$ \.\/configure //p' config.log)"; \
+      /out/usr/local/bin/tcpdump --version; \
+    } > "$meta/buildinfo"; \
+    scanelf --needed --nobanner --format '%n#p' --recursive /out/usr/local | tr ',' '\n' | sort -u > /tmp/needed; \
+    while read -r so; do \
+      if [ -n "$so" ] && [ -z "$(find /out -name "$so" -print -quit)" ]; then echo "so:$so"; fi; \
+    done < /tmp/needed > /tmp/elf-deps; \
+    test -s /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    xargs apk add --no-cache ca-certificates tini < /usr/local/share/randomcontainers/tcpdump/runtime-deps; \
+    addgroup -g 1000 app; \
+    adduser -D -u 1000 -G app app; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "tcpdump"]
+CMD ["--help"]
