@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   ghcr.io/randomcontainers/tcpdump -n -r capture.pcap
 ```
 
-The same images can also be pulled as `randomcontainers.com/tcpdump`.
-
 Copy the DNS packets of a capture file to a new file:
 
 ```sh
