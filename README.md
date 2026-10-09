@@ -47,7 +47,7 @@ Not included: libsmi (SNMP MIB names), libcap-ng, the SMB printer that upstream 
 
 ## Default or slim
 
-tcpdump's default image adds no other tools, so `latest` and `slim` are the same image: `tcpdump` and the libraries it links against. Use `latest` to run it and the `slim` tags as a base for your own image.
+tcpdump's default image adds no other tools, so `latest` and `slim` are the same image: `tcpdump` and the libraries it links against. Use `latest` to run it and the `slim` tags as a base for your own image. The default image of [TShark](https://github.com/randomcontainers/tshark) includes this build of tcpdump.
 
 ## Tags
 
