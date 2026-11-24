@@ -97,7 +97,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 COPY --link --from=build /out/usr/local/ /usr/local/
 RUN set -eu; \
     apt-get update; \
-    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/tcpdump/runtime-deps; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini tzdata < /usr/local/share/randomcontainers/tcpdump/runtime-deps; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -m 1777 /work /cache
 ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
